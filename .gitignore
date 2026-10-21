@@ -1,0 +1,6 @@
+*.mkv
+*.mp4
+*.avi
+data/
+__pycache__/
+.ipynb_checkpoints/

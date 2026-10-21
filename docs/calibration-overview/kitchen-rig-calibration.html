@@ -1,0 +1,258 @@
+<title>Kitchen Rig Calibration</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (~68ch) with figures and tables allowed wider; a single key-figures strip under the title. */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --fg: #15181c;
+  --muted: #5a636e;
+  --rule: #dce0e5;
+  --accent: #2659b8;      /* floor-board blue, used for links and numbers */
+  --ok: #1d7448;          /* "followed" */
+  --ok-bg: #e3f2ea;
+  --adapt: #8a4b00;       /* "adapted" */
+  --adapt-bg: #fbeedd;
+  --plate: #ffffff;       /* white plate behind light-background charts */
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111317; --surface: #191c21; --fg: #e8ebee; --muted: #9ba4ae; --rule: #2b3038;
+    --accent: #79a6f2; --ok: #5ccf94; --ok-bg: #16301f; --adapt: #f0b061; --adapt-bg: #34260f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111317; --surface: #191c21; --fg: #e8ebee; --muted: #9ba4ae; --rule: #2b3038;
+  --accent: #79a6f2; --ok: #5ccf94; --ok-bg: #16301f; --adapt: #f0b061; --adapt-bg: #34260f;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg); color: var(--fg);
+  font: 17px/1.6 var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 72px;
+}
+.page { max-width: 1060px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+.prose { max-width: 68ch; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: clamp(2rem, 5vw, 2.9rem); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.55rem; font-weight: 600; }
+h3 { font-size: 1.1rem; font-weight: 600; }
+p { margin: 0; }
+section { display: flex; flex-direction: column; gap: 18px; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--mono); font-size: 0.86em; }
+.eyebrow { font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+header { display: flex; flex-direction: column; gap: 14px; }
+
+/* key figures */
+.figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--rule);
+  border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.figure-cell { background: var(--surface); padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.figure-cell .value { font-family: var(--display); font-weight: 600; font-size: 1.7rem; color: var(--accent);
+  font-variant-numeric: tabular-nums; line-height: 1.1; }
+.figure-cell .label { font-size: 0.93rem; color: var(--muted); line-height: 1.4; }
+@media (max-width: 760px) { .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* tables */
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+th, td { text-align: left; vertical-align: top; padding: 11px 14px; border-bottom: 1px solid var(--rule); }
+tr:last-child td { border-bottom: 0; }
+th { font-family: var(--mono); font-weight: 500; font-size: 0.74rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.steps td:first-child { font-family: var(--display); font-weight: 600; white-space: nowrap; }
+.steps td { min-width: 170px; }
+.pill { display: inline-block; font-size: 0.8rem; font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+.pill.ok { color: var(--ok); background: var(--ok-bg); }
+.pill.adapt { color: var(--adapt); background: var(--adapt-bg); }
+
+/* figures */
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; }
+figure img { display: block; width: 100%; max-width: 100%; height: auto; border-radius: 6px; border: 1px solid var(--rule); }
+figure.plate img { background: var(--plate); padding: 8px; }
+figcaption { font-size: 0.92rem; color: var(--muted); max-width: 75ch; }
+.pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+@media (max-width: 760px) { .pair { grid-template-columns: minmax(0, 1fr); } }
+
+ol.process { margin: 0; padding: 0; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 14px; max-width: 72ch; }
+ol.process li { counter-increment: step; display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 4px 10px; }
+ol.process li::before { content: counter(step); font-family: var(--mono); font-size: 0.85rem; color: var(--accent);
+  border: 1px solid var(--rule); border-radius: 50%; width: 1.7rem; height: 1.7rem; display: grid; place-items: center; background: var(--surface); }
+ul.plain { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 8px; max-width: 72ch; }
+.note { border-left: 3px solid var(--rule); padding-left: 14px; color: var(--muted); max-width: 72ch; }
+footer { border-top: 1px solid var(--rule); padding-top: 18px; color: var(--muted); font-size: 0.92rem; display: flex; flex-direction: column; gap: 6px; }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">Dexter · 9-camera kitchen · capture 2026-10-20 10:38</div>
+    <h1>Kitchen Rig Calibration</h1>
+    <p class="lede">How the nine kitchen cameras were calibrated from the checkerboard photos saved with the recording, how this fits ATHENA's instructions, and the checks showing that the resulting 3D tracking is correct.</p>
+  </header>
+
+  <div class="figures" role="list">
+    <div class="figure-cell" role="listitem"><div class="value">0.36–0.86 px</div><div class="label">calibration error, per camera (all nine below 1 pixel)</div></div>
+    <div class="figure-cell" role="listitem"><div class="value">99.7–100.3 mm</div><div class="label">a 10 cm board never used for calibration, measured in 3D</div></div>
+    <div class="figure-cell" role="listitem"><div class="value">1.53 m</div><div class="label">median height of the subject's nose above the floor (ankles 0.06 m)</div></div>
+    <div class="figure-cell" role="listitem"><div class="value">97 %</div><div class="label">of frames with the body in 3D (93 % after dropping frames seen by fewer than 4 cameras)</div></div>
+  </div>
+
+  <section>
+    <h2>ATHENA's pipeline, step by step</h2>
+    <p class="prose">ATHENA's README lists four steps. Each was carried out with ATHENA's own code; the table says where the method differs from what the README suggests, and why.</p>
+    <div class="table-wrap">
+      <table class="steps">
+        <thead><tr><th>README step</th><th>What ATHENA asks for</th><th>What was done</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>1 · Organize videos</td>
+            <td><code>videos/&lt;recording&gt;/cam*.avi</code> or <code>.mp4</code>, plus a <code>calibration/</code> folder</td>
+            <td>The recorder's MKV files were repackaged as AVI without re-encoding (frames are bit-identical, 4118 per camera at 40 fps). Cameras were renamed <code>cam0</code>–<code>cam8</code> in a fixed order (cam0 = lab cam_1, etc.).</td>
+            <td><span class="pill ok">Followed</span></td>
+          </tr>
+          <tr>
+            <td>2 · Calibration files</td>
+            <td>JARVIS (YAML) or Anipose (TOML) files with intrinsics, distortion and extrinsics; camera names must match the video names. The README recommends calibrating with the JARVIS toolbox.</td>
+            <td>No calibration had been made, and JARVIS or Anipose need a dedicated video of a board moved through the room. The calibration was instead computed from the checkerboard photo the recorder takes at the start of every capture, and written as an Anipose TOML file with cameras named <code>cam0</code>–<code>cam8</code>. ATHENA's own reader loads it and its cameras match the videos.</td>
+            <td><span class="pill adapt">Format followed, method differs</span></td>
+          </tr>
+          <tr>
+            <td>3 · Processing</td>
+            <td>Run the GUI: 2D detection, then triangulation and refinement</td>
+            <td>The same ATHENA functions called from a notebook, with the GUI's option names. Two settings changed: detection confidence 0.5 instead of 0.9 (at 0.9 the body was missed in most frames of this room), and the 3D and reprojected videos switched on.</td>
+            <td><span class="pill adapt">Followed, 2 settings changed</span></td>
+          </tr>
+          <tr>
+            <td>4 · Montage</td>
+            <td><code>athena-montage</code>: all views and the 3D skeleton in one video</td>
+            <td>ATHENA's montage script fails with the installed version of its video library (moviepy 2). The same layout was re-implemented.</td>
+            <td><span class="pill adapt">Re-implemented</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>How the calibration was made</h2>
+    <h3>Input</h3>
+    <p class="prose">At the start of the capture, all nine cameras took one photo at the same instant of two checkerboards of 7 × 5 squares, 10 cm each: one on the floor, one on the counter. The lens focal lengths (8, 12 and 16 mm) from the recorder's configuration and the sensor's pixel size (5.86 µm) served only as starting values.</p>
+    <figure>
+      <img src="img/boards.jpg" alt="Nine camera views of the kitchen with the corners of the two checkerboards marked: floor board in blue, counter board in green." width="1600" height="1000">
+      <figcaption>Board corners found automatically in each calibration photo: floor board in blue, counter board in green. All nine cameras see the counter board; six of them also see the floor board.</figcaption>
+    </figure>
+
+    <h3>Method</h3>
+    <ol class="process">
+      <li><span>Find the 24 inner corners of every board in every photo.</span></li>
+      <li><span>Decide which board is which, and which way round it lies (a checkerboard looks the same turned by 180°). Every possibility is fitted and only one is geometrically consistent: 0.4–0.7 px error against 2.6–8 px for the next best. For the three cameras that see a single board, matching kitchen features with the other cameras decides (135–187 agreeing features against at most 31).</span></li>
+      <li><span>Adjust all cameras together (bundle adjustment): focal length, lens distortion, position and orientation. Besides the board corners it uses features of the kitchen matched between cameras; the photos are simultaneous, so the whole room acts as a calibration object and constrains the image edges, where the boards are absent.</span></li>
+      <li><span>Set the scale from the 10 cm squares, put the origin on a corner of the floor board and point z up, so every 3D coordinate is in millimetres and z is the height above the floor.</span></li>
+    </ol>
+
+    <h3>Output</h3>
+    <p class="prose">One file, <code>calibration/calibration.toml</code>, giving each camera's focal length, radial distortion, rotation and position.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ATHENA</th><th>Lab name</th><th class="num">Lens</th><th class="num">Boards seen</th><th class="num">Focal length</th><th class="num">Error</th><th class="num">Position x, y, z</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">cam0</td><td>cam_1</td><td class="num">12 mm</td><td class="num">1</td><td class="num">2119 px</td><td class="num">0.55 px</td><td class="num">−0.68, 1.79, 2.43 m</td></tr>
+          <tr><td class="mono">cam1</td><td>cam_2</td><td class="num">8 mm</td><td class="num">1</td><td class="num">1460 px</td><td class="num">0.36 px</td><td class="num">0.70, 1.52, 2.42 m</td></tr>
+          <tr><td class="mono">cam2</td><td>cam_3</td><td class="num">8 mm</td><td class="num">2</td><td class="num">1438 px</td><td class="num">0.43 px</td><td class="num">1.65, 1.33, 2.41 m</td></tr>
+          <tr><td class="mono">cam3</td><td>cam_4</td><td class="num">12 mm</td><td class="num">2</td><td class="num">2076 px</td><td class="num">0.71 px</td><td class="num">1.76, 1.13, 2.41 m</td></tr>
+          <tr><td class="mono">cam4</td><td>cam_5</td><td class="num">8 mm</td><td class="num">2</td><td class="num">1464 px</td><td class="num">0.66 px</td><td class="num">1.75, −1.26, 2.44 m</td></tr>
+          <tr><td class="mono">cam5</td><td>cam_6</td><td class="num">16 mm</td><td class="num">1</td><td class="num">3090 px</td><td class="num">0.73 px</td><td class="num">1.30, −1.81, 2.52 m</td></tr>
+          <tr><td class="mono">cam6</td><td>cam_7</td><td class="num">8 mm</td><td class="num">2</td><td class="num">1466 px</td><td class="num">0.49 px</td><td class="num">0.49, −1.80, 2.44 m</td></tr>
+          <tr><td class="mono">cam7</td><td>cam_8</td><td class="num">8 mm</td><td class="num">2</td><td class="num">1462 px</td><td class="num">0.40 px</td><td class="num">−0.94, −1.93, 2.45 m</td></tr>
+          <tr><td class="mono">cam8</td><td>cam_9</td><td class="num">8 mm</td><td class="num">2</td><td class="num">1545 px</td><td class="num">0.86 px</td><td class="num">−1.57, 1.10, 2.59 m</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Error is the root-mean-square distance, in pixels, between where the board corners were detected and where the calibration places them. Positions are relative to the floor board's corner. Five of the six 8 mm cameras agree on their focal length within 2 % (1438–1466 px), as identical lenses should; cam_9 comes out 6 % higher.</p>
+  </section>
+
+  <section>
+    <h2>Evidence that it works</h2>
+
+    <h3>The floor lines up in every view</h3>
+    <figure>
+      <img src="img/check.jpg" alt="Nine camera views with a 50 cm grid drawn on the floor and three axes at the floor board's corner." width="1600" height="1000">
+      <figcaption>A 50 cm grid placed on the floor in 3D and drawn into each camera, with 1 m axes at the origin (x red, y green, z blue). The grid lies flat on the floor and the axes sit on the same corner of the floor board in all nine views.</figcaption>
+    </figure>
+
+    <h3>An unseen board is measured correctly</h3>
+    <div class="pair">
+      <figure>
+        <img src="img/leaning.jpg" alt="A checkerboard leaning against a kitchen cabinet with its 24 inner corners marked in orange." width="1000" height="625">
+        <figcaption>Later in the recording a board leans against a cabinet. It was never used for the calibration. Its corners were detected in three cameras (here cam_7) at t = 45 s.</figcaption>
+      </figure>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Cameras used</th><th class="num">Square size</th><th class="num">Flatness</th><th class="num">Fit</th></tr></thead>
+          <tbody>
+            <tr><td>cam_5 + cam_7</td><td class="num">99.7 ± 0.8 mm</td><td class="num">1.0 mm</td><td class="num">0.25 px</td></tr>
+            <tr><td>cam_5 + cam_8</td><td class="num">99.7 ± 0.8 mm</td><td class="num">0.8 mm</td><td class="num">0.17 px</td></tr>
+            <tr><td>cam_7 + cam_8</td><td class="num">100.3 ± 0.9 mm</td><td class="num">1.1 mm</td><td class="num">0.05 px</td></tr>
+            <tr><td>all three</td><td class="num">99.8 ± 0.8 mm</td><td class="num">0.9 mm</td><td class="num">0.69 px</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <p class="prose">Rebuilt in 3D with the calibration as ATHENA loads it, the board has 10 cm squares to within 0.3 %, is flat to about 1 mm, and stands nearly upright (5–6° lean) with its centre 41–42 cm above the floor, as a board standing against a cabinet should.</p>
+
+    <h3>The room and the person have the right sizes</h3>
+    <ul class="plain">
+      <li>All cameras come out at 2.41–2.59 m, consistent with a ceiling-mounted rig.</li>
+      <li>The counter board lies at 0.87 m, a standard kitchen counter height.</li>
+      <li>In ATHENA's tracking, the subject's nose is at a median 1.53 m and the ankles at 0.06 m above the floor.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>ATHENA results on this capture</h2>
+    <figure>
+      <img src="img/montage.jpg" alt="Montage of the nine camera views with the tracked skeleton drawn on the subject, above a 3D skeleton view." width="1600" height="1024">
+      <figcaption>ATHENA's montage: each camera with the 3D skeleton projected back into it, and the 3D skeleton below.</figcaption>
+    </figure>
+    <div class="pair">
+      <figure class="plate">
+        <img src="img/topview.png" alt="Top view of the kitchen showing the nine camera positions and the path of the subject's hips along the counter." width="529" height="546">
+        <figcaption>Path of the subject's hips seen from above, with the camera positions.</figcaption>
+      </figure>
+      <figure class="plate">
+        <img src="img/wrists.png" alt="Line chart of right and left wrist height over 100 seconds, mostly around 1 metre with dips to 0.4 metres." width="882" height="331">
+        <figcaption>Wrist height above the floor: around 1 m while working at the 87 cm counter, dipping when the subject bends down.</figcaption>
+      </figure>
+    </div>
+    <ul class="plain">
+      <li>Body in 3D in 97 % of the 4118 frames; both wrists likewise.</li>
+      <li>Hands (21 points each) in 3D in about 50 % of frames.</li>
+      <li>Frames seen by fewer than 4 cameras (7 %, mostly the last 3 s as the subject walks out) give unreliable 3D and are set aside in the analysis.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Limits and next steps</h2>
+    <ul class="plain">
+      <li><strong>Single snapshot.</strong> One photo per camera constrains the lens model less than a calibration video would. Distortion uses one coefficient and the image centre is assumed to be the optical centre. A short video of a board moved through the room (the JARVIS approach) would tighten the lens parameters near the image edges.</li>
+      <li><strong>Origin per capture.</strong> Each capture is calibrated from its own photo, so its origin is wherever the floor board lay. Placing the board at a marked spot every time keeps captures directly comparable.</li>
+      <li><strong>Hands are small in the image.</strong> The cameras see the whole room, so MediaPipe finds hands in 0–43 % of frames depending on the camera. ATHENA's optional HaMeR backend, which looks for hands around the detected wrists, should do better; it needs the MANO hand model, which requires registering at mano.is.tue.mpg.de.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <div>Files: <code>Dexter/athena_projects/2026-10-20_103853_capture/</code>, with <code>calibration/calibration.toml</code>, <code>calibration_report.json</code>, <code>landmarks/…/…_3Dlandmarks.npy</code> (frames × 75 points × xyz, in mm) and <code>videos_processed/</code>.</div>
+    <div>Code: <code>Dexter/kitchen/</code>, notebooks <code>1_prepare_data.ipynb</code> (steps 1–2) and <code>2_run_athena.ipynb</code> (steps 3–4).</div>
+  </footer>
+</div>
