@@ -485,6 +485,25 @@ def acquisition_qc(rec_dir, main, plt, outdir, summary):
     plt.close(fig)
 
 
+QUALITY_STATUS = {0: 'missing', 1: 'interpolated', 2: 'triangulated'}
+
+
+def point_status(d3, raw):
+    """Per frame and landmark: 0 = missing in the final 3D, 1 = interpolated by ATHENA smoothing (no raw
+    triangulation: < 2 cameras), 2 = triangulated from >= 2 cameras (then smoothed)."""
+    final_ok = np.isfinite(d3).all(-1)
+    raw_ok = np.isfinite(raw).all(-1)
+    return np.where(final_ok, np.where(raw_ok, 2, 1), 0).astype(np.int8)
+
+
+def save_quality(outdir, trial, d3, raw, nc):
+    """analysis/<trial>/<trial>_3Dquality.npz: status, cameras per point and raw (unsmoothed) 3D."""
+    np.savez_compressed(outdir / f'{trial}_3Dquality.npz',
+                        status=point_status(d3, raw), ncams=nc.astype(np.uint8), raw3d=raw.astype(np.float32),
+                        landmark_names=np.array(LANDMARK_NAMES),
+                        legend=np.array([f'{k}={v}' for k, v in QUALITY_STATUS.items()]))
+
+
 def qc(main, rec_dir, trial, fps, outdir):
     import matplotlib
     matplotlib.use('Agg')
@@ -497,6 +516,7 @@ def qc(main, rec_dir, trial, fps, outdir):
     d2ref = np.load(lmdir / f'{trial}_2Dlandmarksrefined.npy')
     R, Lh, B, hs = load_2d(main, trial)
     raw, sw, nc = triangulate_raw(main, trial)
+    save_quality(outdir, trial, d3, raw, nc)
     ncams, nframes = R.shape[:2]
     t = np.arange(nframes) / fps
     camnames = [p.stem for p in sorted((main / 'calibration').glob('*.yaml'))] or [f'cam{i}' for i in range(ncams)]

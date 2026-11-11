@@ -1,2 +1,11 @@
-numpy
+athena-tracking
 opencv-python
+mediapipe==0.10.21
+moviepy<2
+numpy==1.26.4
+# visualization notebook
+jupyterlab
+ipywidgets
+plotly
+pandas
+ipykernel

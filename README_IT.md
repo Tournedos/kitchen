@@ -1,6 +1,6 @@
 # DEXTER kinematics – pipeline ATHENA per il tracking 3D delle mani
 
-*English version: [README_EN.md](README_EN.md)*
+*Versione inglese: [README.md](README.md)*
 
 Pipeline per ricostruire in 3D mani (e corpo) da registrazioni multicamera (9 Basler, `multicam_capture`)
 usando [ATHENA](https://github.com/neural-control-and-computation-lab/athena) (MediaPipe + triangolazione),
@@ -9,9 +9,18 @@ con calibrazione da scacchiera e analisi della qualità dei dati estratti.
 ```
 scripts/
 ├── athena_calibration.py   # 1. calibrazione multicamera dalla scacchiera -> formato ATHENA
-├── athena_analysis.py      # 2. pipeline ATHENA headless + grafici di qualità + log tempi
-└── athena_gui.py           #    (opzionale) GUI originale di ATHENA con font ingranditi
+├── athena_analysis.py      # 2. pipeline ATHENA headless + grafici di qualità + log dei tempi (singola / batch)
+├── collect_data3d.py       #    raccoglie tutti i video data3d.mp4 in videos3ddata/
+├── athena_gui.py           #    (opzionale) GUI originale di ATHENA con font ingranditi
+└── requirements.txt
+notebooks/
+└── landmarks3d_viewer.ipynb  # 3. visualizzazione interattiva dei tracciati 3D e della loro qualità
+data/                       # registrazioni (una cartella per registrazione)
+videos3ddata/               # video dello scheletro 3D, uno per registrazione (collect_data3d.py)
+exports/                    # grafici (HTML) e dati (CSV) salvati dal notebook
+diario/                     # diario di lavoro
 athena_runs_log.csv         # log di tutte le esecuzioni (creato automaticamente)
+.vscode/settings.json       # VSCode: interprete conda + download dei widget per il notebook
 ```
 
 ---
@@ -30,6 +39,8 @@ bash Miniforge3-Linux-x86_64.sh
 conda create -n athena python=3.12
 conda activate athena
 pip install athena-tracking opencv-python
+pip install jupyterlab ipywidgets plotly pandas ipykernel "numpy==1.26.4"   # notebook di visualizzazione
+python -m ipykernel install --user --name athena --display-name "Python (athena)"
 pip install "mediapipe==0.10.21" "moviepy<2"     # versioni compatibili con ATHENA 0.9 (vedi sotto)
 conda install -c conda-forge ffmpeg
 ```
@@ -260,6 +271,7 @@ scrivono `run_info_<passi>.json` e non cambiano lo stato "completato".
 | `landmarks/<trial>/camN/handedness_score.npy` | confidenza lateralità `(frame, 2)` [sinistra, destra] |
 | `analysis/<trial>/<trial>_3Dlandmarks.csv` | il 3D in CSV: `frame, time_s, <landmark>_x/y/z` (celle vuote = mancante) |
 | `analysis/<trial>/<trial>_hands3d.npy` | solo mani, `(frame, 2 [destra, sinistra], 21, 3)` |
+| `analysis/<trial>/<trial>_3Dquality.npz` | qualità di ogni punto: `status` `(frame, 75)` 0 = mancante, 1 = interpolato, 2 = triangolato; `ncams` camere che lo vedono; `raw3d` triangolazione grezza (prima dello smoothing) |
 
 **Indici dei 75 landmark**: 0–32 corpo (MediaPipe Pose), 33–53 mano destra, 54–74 mano sinistra.
 Dentro ogni mano: 0 polso, 1–4 pollice (4 = punta), 5–8 indice (8 = punta), 9–12 medio, 13–16 anulare,
@@ -271,6 +283,22 @@ d3 = np.load('athena/landmarks/<trial>/<trial>_3Dlandmarks.npy')
 right, left = d3[:, 33:54], d3[:, 54:75]
 tapping = np.linalg.norm(right[:, 4] - right[:, 8], axis=1)   # distanza pollice-indice [mm]
 ```
+
+**Triangolato o interpolato?** Il 3D finale di ATHENA è filtrato e riempie i buchi più corti di 5 frame,
+quindi da solo non dice quali valori sono misurati. Lo script ripete la triangolazione senza smoothing e
+confronta, punto per punto:
+* **triangolato**: il punto è visto da ≥ 2 camere in quel frame. È un dato misurato, poi filtrato;
+* **interpolato**: il punto è visto da < 2 camere, ma il 3D finale ha un valore riempito dallo smoothing;
+* **mancante**: il 3D finale è vuoto (buco di 5 o più frame).
+
+```python
+q = np.load('athena/analysis/<trial>/<trial>_3Dquality.npz')
+status, ncams = q['status'], q['ncams']            # (frame, 75)
+interpolati = status[:, 33 + 8] == 1               # frame in cui la punta dell'indice destro è interpolata
+```
+
+Per le registrazioni elaborate prima di questo file: `python scripts/athena_analysis.py data --skip-3d --redo`
+(rifà solo export e QC, pochi secondi). In alternativa lo crea il notebook al primo caricamento.
 
 ### Grafici di qualità (`analysis/<trial>/`)
 
@@ -450,6 +478,43 @@ print(ok.groupby(['outputs_profile', 'use_gpu'])[['s_per_camera_frame_2d', 's_pe
 
 ---
 
+## 5b. Visualizzazione interattiva – `notebooks/landmarks3d_viewer.ipynb`
+
+Notebook Jupyter per esplorare i tracciati 3D. Si sceglie con i controlli:
+* **registrazione**;
+* **landmark**, filtrati per gruppo: mano destra, mano sinistra, corpo;
+* **grandezza**:
+  - posizione x/y/z;
+  - velocità (modulo o per componenti) e accelerazione;
+  - distanza A–B e angolo A–B–C, per esempio la flessione di un dito;
+  - numero di camere;
+* **intervallo di tempo**.
+
+Le quattro schede:
+
+| Scheda | Contenuto |
+|---|---|
+| Serie temporali | grafici zoomabili; bande **arancioni = interpolato**, **rosse = mancante**; opzionale la triangolazione grezza sovrapposta |
+| Traiettoria 3D | percorsi nel tempo + scheletro delle mani a un frame scelto, giunti colorati per stato |
+| Qualità | mappa nel tempo dello stato (o del numero di camere) di ogni landmark |
+| Statistiche | per landmark: % triangolato/interpolato/mancante, camere medie, buchi, ampiezza del movimento, velocità |
+
+*Salva grafico* scrive l'HTML interattivo e *Salva dati* scrive il CSV con lo stato di ogni punto, entrambi in
+`exports/`.
+
+```bash
+~/miniforge3/envs/athena/bin/jupyter lab notebooks/landmarks3d_viewer.ipynb
+```
+
+In VSCode: aprire il notebook → *Select Kernel* → *Jupyter Kernel* → **Python (athena)**.
+
+Tutto ciò che si può voler cambiare (cartella dati, registrazione, landmark e grandezza iniziali, media mobile,
+altezza grafici, cartella di export) è nella cella **Parametri**. Le stesse funzioni (`load_trial`,
+`timeseries_figure`, `compute_series`, `stats_table`, ...) si possono chiamare anche da codice: vedi l'ultima
+sezione del notebook.
+
+---
+
 ## 6. GUI originale di ATHENA (opzionale)
 
 ```bash
@@ -469,6 +534,8 @@ blocca a lungo l'interfaccia. Per l'uso normale preferire `athena_analysis.py`.
 |---|---|
 | `cannot import name 'solutions' from 'mediapipe'` | `pip install "mediapipe==0.10.21"` |
 | `No module named 'moviepy.editor'` | `pip install "moviepy<2"` |
+| VSCode: la cella dei controlli del notebook resta "in esecuzione" e i controlli non compaiono (log Jupyter: *Widget Error: Failed to access CDN*) | VSCode non è autorizzato a scaricare il codice dei widget: in `.vscode/settings.json` del progetto c'è già `"jupyter.widgetScriptSources": ["jsdelivr.com", "unpkg.com"]`; ricaricare la finestra (*Developer: Reload Window*) e riavviare il kernel. In alternativa usare JupyterLab |
+| VSCode: `Import "numpy" could not be resolved`, o `python` che non trova i pacchetti | VSCode usa la vecchia `.venv` (Python 3.14, vuota) invece dell'ambiente conda: cancellare `.venv` e scegliere l'interprete `~/miniforge3/envs/athena/bin/python` (*Python: Select Interpreter*) |
 | `conda: command not found` dopo l'installazione | `~/miniforge3/bin/conda init bash && source ~/.bashrc` |
 | scritte minuscole nella GUI | usare `scripts/athena_gui.py` |
 | mani rilevate in poche camere | le camere inquadrano la stanza: le mani sono piccole (60–100 px). Abbassare `--hand-conf`; controllare `02_detection_2d.png` |
