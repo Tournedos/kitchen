@@ -412,6 +412,16 @@ def export(main, trial, d3, fps, outdir):
         for f in range(d3.shape[0]):
             w.writerow([f, f'{f / fps:.4f}'] + [('' if np.isnan(v) else f'{v:.3f}') for v in d3[f].ravel()])
     np.save(outdir / f'{trial}_hands3d.npy', np.stack([d3[:, 33:54], d3[:, 54:75]], axis=1))  # (frames, 2[R,L], 21, 3)
+    # joint angles of both hands (hand_angles.py): MCP/PIP/DIP flexion, TAM, spread, thumb, wrist, forearm
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import hand_angles as HA
+    ang, _ = HA.all_hand_angles(d3)
+    with open(outdir / f'{trial}_joint_angles.csv', 'w', newline='') as fh:
+        w = csv.writer(fh)
+        w.writerow(['frame', 'time_s'] + list(ang))
+        vals = np.stack(list(ang.values()), axis=1)
+        for f in range(d3.shape[0]):
+            w.writerow([f, f'{f / fps:.4f}'] + [('' if np.isnan(v) else f'{v:.2f}') for v in vals[f]])
     log(f'exported {path.relative_to(main)}')
 
 
@@ -486,6 +496,9 @@ def acquisition_qc(rec_dir, main, plt, outdir, summary):
 
 
 QUALITY_STATUS = {0: 'missing', 1: 'interpolated', 2: 'triangulated'}
+QUALITY_CLASS = {0: 'missing', 1: 'interpolated', 2: 'suspect', 3: 'reliable'}
+# default thresholds of the "reliable" mask (the notebook lets you change them)
+QUALITY_DEFAULTS = {'min_cams': 3, 'max_reproj_px': 20.0, 'max_dev_mm': 10.0, 'exclude_near_gap': True}
 
 
 def point_status(d3, raw):
@@ -496,12 +509,111 @@ def point_status(d3, raw):
     return np.where(final_ok, np.where(raw_ok, 2, 1), 0).astype(np.int8)
 
 
-def save_quality(outdir, trial, d3, raw, nc):
-    """analysis/<trial>/<trial>_3Dquality.npz: status, cameras per point and raw (unsmoothed) 3D."""
-    np.savez_compressed(outdir / f'{trial}_3Dquality.npz',
-                        status=point_status(d3, raw), ncams=nc.astype(np.uint8), raw3d=raw.astype(np.float32),
+def smoothing_window(fps, lfc):
+    """Savitzky-Golay window [frames] used by ATHENA smooth3d for the given frame rate and cutoff."""
+    return max(3, int(fps / lfc * 2 + 1) | 1)
+
+
+def reprojection_error(main, raw, sw):
+    """Per frame and landmark: mean and max over the cameras that detected the point of the distance [px]
+    between the 2D detection and the raw 3D point projected back into that camera."""
+    import warnings
+    ext, K, _ = load_calibration(main)
+    ncams, nframes, nlm, _ = sw.shape
+    X = np.concatenate([raw.reshape(-1, 3), np.ones((nframes * nlm, 1))], axis=1)
+    err = np.full((ncams, nframes, nlm), np.nan)
+    for c in range(ncams):
+        x = X @ (np.asarray(K[c]) @ np.asarray(ext[c])[:3, :]).T
+        uv = (x[:, :2] / x[:, 2:3]).reshape(nframes, nlm, 2)
+        err[c] = np.linalg.norm(uv - sw[c], axis=-1)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        return np.nanmean(err, 0), np.nanmax(err, 0)
+
+
+def near_gap_mask(raw, half_window):
+    """True for triangulated frames within `half_window` frames of a frame where the raw 3D is missing: their
+    smoothing window includes ATHENA's linear fill across the gap, so they are partly distorted."""
+    miss = ~np.isfinite(raw).all(-1)
+    near = np.zeros_like(miss)
+    for k in range(1, half_window + 1):
+        near[k:] |= miss[:-k]
+        near[:-k] |= miss[k:]
+    return near & ~miss
+
+
+def quality_classes(q, min_cams=None, max_reproj_px=None, max_dev_mm=None, exclude_near_gap=None):
+    """Classify every point (frame, landmark): 0 missing, 1 interpolated, 2 suspect, 3 reliable.
+    `q`: dict/npz from <trial>_3Dquality.npz. A triangulated point is *suspect* if any check fails:
+        few_cams   seen by fewer than min_cams cameras
+        reproj     max reprojection error over cameras > max_reproj_px  (wrong detection in some camera)
+        outlier    |raw - final| > max_dev_mm                          (spike flattened by the smoothing)
+        near_gap   within half a smoothing window of a gap               (distorted by the gap fill)
+    Returns (classes int8 array, {reason: bool array})."""
+    d = QUALITY_DEFAULTS
+    min_cams = d['min_cams'] if min_cams is None else min_cams
+    max_reproj_px = d['max_reproj_px'] if max_reproj_px is None else max_reproj_px
+    max_dev_mm = d['max_dev_mm'] if max_dev_mm is None else max_dev_mm
+    exclude_near_gap = d['exclude_near_gap'] if exclude_near_gap is None else exclude_near_gap
+    status = np.asarray(q['status'])
+    tri = status == 2
+    reasons = {
+        'few_cams': tri & (np.asarray(q['ncams']) < min_cams),
+        'reproj': tri & (np.nan_to_num(np.asarray(q['reproj_max_px'], float), nan=0) > max_reproj_px),
+        'outlier': tri & (np.nan_to_num(np.asarray(q['dev_mm'], float), nan=0) > max_dev_mm),
+        'near_gap': tri & np.asarray(q['near_gap'], bool) if exclude_near_gap else np.zeros_like(tri),
+    }
+    suspect = np.zeros_like(tri)
+    for m in reasons.values():
+        suspect |= m
+    cls = np.where(tri, np.where(suspect, 2, 3), status).astype(np.int8)
+    return cls, reasons
+
+
+def quality_metrics(main, d3, raw, sw, nc, fps, lfc):
+    """All per-point quality arrays saved in <trial>_3Dquality.npz."""
+    rmean, rmax = reprojection_error(main, raw, sw)
+    win = smoothing_window(fps, lfc)
+    return {
+        'status': point_status(d3, raw), 'ncams': nc.astype(np.uint8), 'raw3d': raw.astype(np.float32),
+        'reproj_mean_px': rmean.astype(np.float32), 'reproj_max_px': rmax.astype(np.float32),
+        'dev_mm': np.linalg.norm(raw - d3, axis=-1).astype(np.float32),
+        'near_gap': near_gap_mask(raw, win // 2), 'smoothing_window': np.int16(win),
+    }
+
+
+def save_quality(outdir, trial, metrics):
+    """analysis/<trial>/<trial>_3Dquality.npz (see quality_metrics / quality_classes)."""
+    np.savez_compressed(outdir / f'{trial}_3Dquality.npz', **metrics,
                         landmark_names=np.array(LANDMARK_NAMES),
                         legend=np.array([f'{k}={v}' for k, v in QUALITY_STATUS.items()]))
+
+
+def lfc_used(adir):
+    """Smoothing cutoff [Hz] of the last run that computed the 3D (run_options.json or run_options_3d+qc.json)."""
+    files = [f for f in (Path(adir) / 'run_options.json', Path(adir) / 'run_options_3d+qc.json') if f.exists()]
+    if not files:
+        return 12.0
+    f = max(files, key=lambda f: f.stat().st_mtime)
+    return float(json.loads(f.read_text()).get('all_landmarks_lfc', 12.0))
+
+
+def compute_quality(main, trial, d3=None, fps=None, lfc=None, save=True):
+    """Compute (and save) the quality file of a trial from its 2D landmarks and final 3D."""
+    main = Path(main)
+    if d3 is None:
+        d3 = np.load(main / 'landmarks' / trial / f'{trial}_3Dlandmarks.npy')
+    adir = main / 'analysis' / trial
+    if lfc is None:
+        lfc = lfc_used(adir)
+    if fps is None:
+        vids = sorted(v for v in (main / 'videos' / trial).glob('*.mp4') if v.exists())
+        fps = video_frames(vids[0])[1] if vids else 40.0
+    raw, sw, nc = triangulate_raw(main, trial)
+    m = quality_metrics(main, d3, raw, sw, nc, fps, lfc)
+    if save and adir.is_dir():
+        save_quality(adir, trial, m)
+    return m
 
 
 def qc(main, rec_dir, trial, fps, outdir):
@@ -516,7 +628,9 @@ def qc(main, rec_dir, trial, fps, outdir):
     d2ref = np.load(lmdir / f'{trial}_2Dlandmarksrefined.npy')
     R, Lh, B, hs = load_2d(main, trial)
     raw, sw, nc = triangulate_raw(main, trial)
-    save_quality(outdir, trial, d3, raw, nc)
+    lfc = lfc_used(outdir)
+    qm = quality_metrics(main, d3, raw, sw, nc, fps, lfc)
+    save_quality(outdir, trial, qm)
     ncams, nframes = R.shape[:2]
     t = np.arange(nframes) / fps
     camnames = [p.stem for p in sorted((main / 'calibration').glob('*.yaml'))] or [f'cam{i}' for i in range(ncams)]
@@ -654,6 +768,19 @@ def qc(main, rec_dir, trial, fps, outdir):
         summary['hands'][hand]['raw_vs_final_rmse_mm'] = float(
             np.sqrt(np.nanmean(np.sum((raw[:, o:o + 21] - d3[:, o:o + 21]) ** 2, axis=-1))))
 
+    # ---- point reliability with the default thresholds (QUALITY_DEFAULTS; adjustable in the notebook)
+    cls, reasons = quality_classes(qm)
+    summary['quality_thresholds'] = dict(QUALITY_DEFAULTS, smoothing_window_frames=int(qm['smoothing_window']))
+    for hand, o in HANDS.items():
+        c = cls[:, o:o + 21]
+        summary['hands'][hand].update({
+            'reliable_percent': float(100 * (c == 3).mean()), 'suspect_percent': float(100 * (c == 2).mean()),
+            'interpolated_percent': float(100 * (c == 1).mean()), 'missing_percent': float(100 * (c == 0).mean()),
+            'suspect_reasons_percent': {k: float(100 * v[:, o:o + 21].mean()) for k, v in reasons.items()},
+            'reproj_max_px_median': float(np.nanmedian(qm['reproj_max_px'][:, o:o + 21])),
+            'raw_final_dev_mm_p99': float(np.nanpercentile(qm['dev_mm'][:, o:o + 21], 99)),
+        })
+
     # ---- 06 reprojection error (2D detections after hand switching vs reprojected final 3D)
     err = np.linalg.norm(sw - d2ref, axis=-1)  # ncams, nframes, nlm
     fig, ax = plt.subplots(2, 2, figsize=(14, 8))
@@ -714,6 +841,11 @@ def print_summary(s):
     for h, d in s['hands'].items():
         print(f"{h:5s} hand: raw 3D {d['raw_valid_percent']:5.1f}%  final {d['final_valid_percent']:5.1f}%  "
               f"gaps raw/final {d['n_gaps_raw']}/{d['n_gaps_final']}  longest final gap {d['longest_gap_final_s']:.2f} s")
+        if 'reliable_percent' in d:
+            r = d['suspect_reasons_percent']
+            print(f"           reliable {d['reliable_percent']:5.1f}%  suspect {d['suspect_percent']:5.1f}% "
+                  f"(<{s['quality_thresholds']['min_cams']} cams {r['few_cams']:.1f}%, reproj {r['reproj']:.1f}%, "
+                  f"outlier {r['outlier']:.1f}%, near gap {r['near_gap']:.1f}%)")
     print('=============================================\n')
 
 
@@ -1127,7 +1259,9 @@ def process_recording(folder, args, opts, hw, skip_done=False):
             times['t_prepare_s'] = time.time() - t0
             outdir = main_dir / 'analysis' / trial
             outdir.mkdir(parents=True, exist_ok=True)
-            (outdir / 'run_options.json').write_text(json.dumps(opts, indent=2))
+            # run_options.json = options of the last full run; partial runs (--skip-2d/--skip-3d) get their own file
+            ro_name = 'run_options.json' if row['steps'] == '2d+3d+qc' else f"run_options_{row['steps']}.json"
+            (outdir / ro_name).write_text(json.dumps(opts, indent=2))
             if not args.skip_2d and not args.skip_3d:
                 log('ATHENA 2D detection ...')
                 t0 = time.time()

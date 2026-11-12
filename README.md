@@ -11,6 +11,7 @@ scripts/
 ├── athena_calibration.py   # 1. multi-camera calibration from the checkerboard -> ATHENA format
 ├── athena_analysis.py      # 2. headless ATHENA pipeline + quality plots + run-time log (single / batch)
 ├── collect_data3d.py       #    collects all data3d.mp4 videos into videos3ddata/
+├── hand_angles.py          #    joint angles (MCP, PIP, DIP, TAM, spread, thumb, wrist, forearm)
 ├── athena_gui.py           #    (optional) original ATHENA GUI with enlarged fonts
 └── requirements.txt
 notebooks/
@@ -91,6 +92,15 @@ data/<recording>/athena/
 
 `<trial>` is the recording name without date/time (e.g. `louis_finertapping_01`), or the name of the
 subfolders already present in `athena/videos/`.
+
+**Recording recommendations** (from the first recordings):
+* start recording **a couple of seconds before** the movement begins and stop **a couple of seconds after** it
+  ends: the first and last frames often have the hands partly out of view or not yet detected, and the
+  smoothing is less reliable at the edges of the trial;
+* avoid complete occlusions of a hand (body, other hand, objects) as far as the task allows: an occluded hand
+  becomes *missing* (gaps of 6+ frames are not filled);
+* hands should be seen by **at least 3 cameras** for most of the time (check `qc_summary.json` or the notebook:
+  with 2 cameras a wrong detection cannot be recognized).
 
 ---
 
@@ -271,7 +281,8 @@ write `run_info_<steps>.json` and do not change the "completed" state.
 | `landmarks/<trial>/camN/handedness_score.npy` | handedness confidence `(frame, 2)` [left, right] |
 | `analysis/<trial>/<trial>_3Dlandmarks.csv` | 3D as CSV: `frame, time_s, <landmark>_x/y/z` (empty cells = missing) |
 | `analysis/<trial>/<trial>_hands3d.npy` | hands only, `(frame, 2 [right, left], 21, 3)` |
-| `analysis/<trial>/<trial>_3Dquality.npz` | quality of each point: `status` `(frame, 75)` 0 = missing, 1 = interpolated, 2 = triangulated; `ncams` cameras that see it; `raw3d` raw triangulation (before smoothing) |
+| `analysis/<trial>/<trial>_3Dquality.npz` | quality of every point `(frame, 75)`: `status` 0 = missing, 1 = interpolated, 2 = triangulated; `ncams` cameras that see it; `raw3d` raw triangulation (before smoothing); `reproj_max_px` / `reproj_mean_px` reprojection error over the cameras; `dev_mm` \|raw − final\|; `near_gap` within half a smoothing window of a gap; `smoothing_window` [frames]. See *Data quality* below |
+| `analysis/<trial>/<trial>_joint_angles.csv` | joint angles of both hands [°] per frame: `frame, time_s, R index MCP flexion, …` (50 angles, see *Joint angles*) |
 
 **Indices of the 75 landmarks**: 0–32 body (MediaPipe Pose), 33–53 right hand, 54–74 left hand.
 Within each hand: 0 wrist, 1–4 thumb (4 = tip), 5–8 index (8 = tip), 9–12 middle, 13–16 ring,
@@ -284,21 +295,99 @@ right, left = d3[:, 33:54], d3[:, 54:75]
 tapping = np.linalg.norm(right[:, 4] - right[:, 8], axis=1)   # thumb-index distance [mm]
 ```
 
-**Triangulated or interpolated?** ATHENA's final 3D is filtered and fills gaps shorter than 5 frames, so on its
-own it does not say which values were measured. The script repeats the triangulation without smoothing and
-compares, point by point:
-* **triangulated**: the point is seen by ≥ 2 cameras in that frame. It is measured data, then filtered;
-* **interpolated**: the point is seen by < 2 cameras, but the final 3D has a value filled in by the smoothing;
-* **missing**: the final 3D is empty (gap of 5 or more frames).
+### Data quality: what ATHENA does to the data, and how reliable each point is
+
+**How ATHENA processes the data** (`athena.triangulaterefine`, with the options of this pipeline):
+1. MediaPipe 2D on every camera; a missed detection becomes NaN. Left/right hand labels are made consistent
+   across cameras.
+2. **Triangulation**: linear (DLT) with all cameras that see the point, if there are at least 2. There is **no
+   outlier rejection**, no reprojection-error threshold and no confidence weighting: a wrong detection in one
+   camera moves the 3D point and the point still counts as "triangulated".
+3. **Smoothing**: Savitzky-Golay filter (polynomial order 3) on each coordinate of each landmark. The window is
+   `int(fps / lfc × 2 + 1)` rounded up to odd: **7 frames (175 ms)** at 40 fps with `--lfc 12`.
+   - Before filtering, **all** gaps are filled by linear interpolation (constant value at the start/end of the
+     trial); after filtering, NaN is put back only for gaps of **6 frames or more**. Gaps of up to 5 frames
+     (125 ms) stay filled.
+   - A landmark with fewer valid frames than the window is not filtered.
+   - ATHENA's other refinements (low-pass on the hand centroid, bone-length constraints) are **switched off** in
+     this step.
+
+So the final 3D can contain: values filled in by linear interpolation (constant speed, zero acceleration inside
+the gap), values next to a gap distorted by the fill, and spikes from wrong detections that are attenuated but
+not removed.
+
+**Reliability of each point.** The script repeats the triangulation without smoothing and saves, for every frame
+and landmark, the metrics in `analysis/<trial>/<trial>_3Dquality.npz`. Each point gets a class:
+
+| class | meaning |
+|---|---|
+| **reliable** | triangulated (≥ 2 cameras) and passes all the checks below |
+| **suspect** | triangulated, but fails at least one check |
+| **interpolated** | seen by < 2 cameras, value filled in by the smoothing (gap of up to 5 frames) |
+| **missing** | no value in the final 3D (gap of 6 or more frames) |
+
+| check | fails when (default threshold) | what it reveals |
+|---|---|---|
+| `few_cams` | fewer than **3** cameras see the point | no redundancy: with 2 cameras a wrong detection cannot be detected |
+| `reproj` | max reprojection error over the cameras > **20 px** | a camera whose 2D detection disagrees with the 3D point (wrong detection / wrong hand) |
+| `outlier` | \|raw − final\| > **10 mm** | spike in the raw triangulation flattened by the smoothing |
+| `near_gap` | within half a smoothing window (3 frames) of a gap | value partly distorted by the linear fill across the gap |
+
+The defaults (`QUALITY_DEFAULTS` in `athena_analysis.py`) come from the distributions on the first recordings:
+20 px and 10 mm are about the 95th–99th percentile. The QC uses them for `qc_summary.json` and for the summary
+printed at the end of each run (`reliable … suspect … (<3 cams …, reproj …, outlier …, near gap …)`); the notebook
+lets you change them interactively.
 
 ```python
-q = np.load('athena/analysis/<trial>/<trial>_3Dquality.npz')
-status, ncams = q['status'], q['ncams']            # (frame, 75)
-interpolated = status[:, 33 + 8] == 1              # frames where the right index tip is interpolated
+import numpy as np, sys
+sys.path.insert(0, 'scripts'); import athena_analysis as AA
+q = dict(np.load('data/<recording>/athena/analysis/<trial>/<trial>_3Dquality.npz'))
+cls, reasons = AA.quality_classes(q, min_cams=3, max_reproj_px=20, max_dev_mm=10)   # (frame, 75)
+reliable = cls == 3                       # 0 missing, 1 interpolated, 2 suspect, 3 reliable
+reproj_bad = reasons['reproj']            # also 'few_cams', 'outlier', 'near_gap'
 ```
 
-For recordings processed before this file existed: `python scripts/athena_analysis.py data --skip-3d --redo`
-(redoes only export and QC, a few seconds). Alternatively the notebook creates it on first load.
+For recordings processed before these metrics existed: `python scripts/athena_analysis.py data --skip-3d --redo`
+(redoes only export and QC, a few seconds each). Alternatively the notebook computes them on first load.
+
+### Joint angles – `scripts/hand_angles.py`
+
+Computed from the final 3D for both hands, exported in `analysis/<trial>/<trial>_joint_angles.csv` and available in
+the notebook (quantity *joint angles*). Degrees; names start with `R` / `L`.
+
+| angle | definition | sign |
+|---|---|---|
+| **MCP flexion** (index, middle, ring, pinky) | metacarpal (wrist → MCP) vs proximal phalanx (MCP → PIP), around the hand flexion axis (index MCP → pinky MCP) | 0 = straight, + flexion, − hyperextension |
+| **PIP flexion** | proximal phalanx vs middle phalanx, same axis | idem |
+| **DIP flexion** | middle phalanx vs distal phalanx, same axis | idem |
+| **TAM** (total active motion) | MCP + PIP + DIP of a finger | |
+| **spread** index–middle, middle–ring, ring–pinky | angle between the proximal phalanges of adjacent fingers, on the palm plane (MCP abduction) | ≥ 0 |
+| **thumb MCP / IP flexion** | consecutive thumb segments (CMC → MCP → IP → tip) | 0 = straight, ≥ 0 |
+| **thumb abduction** | 1st (thumb) vs 2nd (index) metacarpal | ≥ 0 |
+| **wrist flexion/extension** | forearm (elbow → wrist) vs hand (wrist → middle MCP), around the flexion axis | + palmar flexion, − extension |
+| **wrist radial/ulnar deviation** | same vectors on the palm plane | + radial (thumb side), − ulnar |
+| **forearm rotation** | palm normal vs vertical, around the forearm axis (world Z up) | 0 palm down … 90 vertical … 180 palm up |
+
+Why these: MCP and PIP flexion are the main measures of finger function (grasp, tapping); DIP completes the finger
+chain and TAM summarizes it (a standard clinical measure); spread describes the opening of the hand; thumb
+abduction and thumb flexions describe grasp and opposition (thumb–finger distances are in the notebook as
+*distance A–B*); the wrist and forearm angles describe the posture in which the hand works.
+
+Notes:
+* the flexion sign is the same for both hands (the flexion axis is mirrored for the left hand); verified on the
+  recordings: PIP and MCP are almost always positive, DIP rarely slightly negative (physiological hyperextension);
+* MediaPipe's thumb landmark 1 (CMC) is an approximation of the trapeziometacarpal joint: the thumb CMC flexion /
+  opposition is not computed as a joint angle;
+* the **wrist and forearm angles use the elbow from MediaPipe Pose**: on the current recordings its reprojection
+  error is large (median 30–450 px, against 5–9 px for the hand), so they are classed *suspect* and should be
+  treated as indicative;
+* the quality of an angle in each frame (notebook) is the worst class among the landmarks it uses.
+
+```python
+import sys, numpy as np; sys.path.insert(0, 'scripts')
+from hand_angles import hand_angles
+angles, used = hand_angles(np.load('.../<trial>_3Dlandmarks.npy'), 'R')   # {name: (frames,) °}, {name: [landmarks]}
+```
 
 ### Quality plots (`analysis/<trial>/`)
 
@@ -311,12 +400,12 @@ For recordings processed before this file existed: `python scripts/athena_analys
 | `05_timeseries_<hand>.png` | x, y, z of wrist / thumb tip / index tip (line = final, dots = raw triangulation); speed with spikes (× = above median + 6·MAD); thumb–index distance; cameras per point |
 | `06_reprojection.png` | reprojection error [px] per camera and over time: cameras with high error = wrong calibration or detections |
 | `07_bone_lengths.png` | bone lengths over time: should be constant; high variability = noise or hand swaps |
-| `qc_summary.json` | all numeric metrics (detection %, gaps, errors, spikes, bone CV) |
+| `qc_summary.json` | all numeric metrics (detection %, gaps, errors, spikes, bone CV) and, per hand, % reliable / suspect / interpolated / missing with the share of each failed check (`quality_thresholds` = thresholds used) |
 | `run_options.json`, `run_info.json` | options and info/timings of this run |
 
 Interpretation notes:
 * *raw 3D* = direct triangulation of the detections (≥ 2 cameras needed). *final 3D* = ATHENA output after
-  smoothing, which **interpolates gaps shorter than 5 frames**: a "valid" value in the final data may be interpolated.
+  smoothing, which **interpolates gaps of up to 5 frames**: a "valid" value in the final data may be interpolated.
 * Speed spikes during tapping may be real movements: evaluate them together with the
   thumb–index distance trace.
 
@@ -479,27 +568,35 @@ print(ok.groupby(['outputs_profile', 'use_gpu'])[['s_per_camera_frame_2d', 's_pe
 
 ## 5b. Interactive visualization – `notebooks/landmarks3d_viewer.ipynb`
 
-Jupyter notebook for exploring the 3D tracks. The controls choose:
+Jupyter notebook for exploring the 3D tracks and their quality. The controls choose:
 * **recording**;
 * **landmarks**, filtered by group: right hand, left hand, body;
 * **quantity**:
   - x/y/z position;
   - speed (magnitude or per component) and acceleration;
   - A–B distance and A–B–C angle, e.g. finger flexion;
-  - number of cameras;
-* **time interval**.
+  - **joint angles** (MCP, PIP, DIP flexion, TAM, spread, thumb, wrist, forearm), chosen in the *Joint angles* list
+    that replaces the landmark list; the *Statistics* tab then shows, per angle, quality and range of motion (ROM)
+    on all frames and on the reliable frames only;
+  - **bone length** ending at each selected landmark (e.g. `R_index_tip` = distal phalanx): it should be constant;
+  - quality: number of cameras, **reprojection error** (max / mean over the cameras), **raw–final deviation**,
+    with the threshold drawn as a dashed line;
+* **time interval**;
+* **quality thresholds** (panel): minimum cameras, maximum reprojection error, maximum raw–final deviation,
+  frames near a gap. All plots and tables update.
 
 The four tabs:
 
 | Tab | Content |
 |---|---|
-| Time series | zoomable plots; **orange bands = interpolated**, **red = missing**; optional raw triangulation overlay |
-| 3D trajectory | paths over time + hand skeleton at a chosen frame, joints coloured by status |
-| Quality | map over time of the status (or number of cameras) of each landmark |
-| Statistics | per landmark: % triangulated/interpolated/missing, mean cameras, gaps, movement range, speed |
+| Time series | zoomable plots; bands **purple = suspect**, **orange = interpolated**, **red = missing**; the hover shows class and failed checks; optional raw triangulation overlay (position, bone length) |
+| 3D trajectory | paths over time + hand skeleton at a chosen frame, joints coloured by class (hover: cameras, reprojection error, deviation) |
+| Quality | map over time, per landmark, of class, number of cameras, reprojection error or raw–final deviation |
+| Statistics | per landmark: % reliable/suspect/interpolated/missing, % of each failed check, mean cameras, median reprojection error, deviation p99, gaps, movement range, speed |
 
-*Save plot* writes the interactive HTML and *Save data* writes the CSV with the status of each point, both in
-`exports/`.
+*Save plot* writes the interactive HTML and *Save data* writes the CSV with, for every landmark, the class
+(`status_<landmark>`) and the failed checks (`flags_<landmark>`, e.g. `few_cams;reproj`) of each point, both in
+`exports/`. The last cells of the notebook show a reliability table of all recordings.
 
 ```bash
 ~/miniforge3/envs/athena/bin/jupyter lab notebooks/landmarks3d_viewer.ipynb
@@ -507,8 +604,8 @@ The four tabs:
 
 In VSCode: open the notebook → *Select Kernel* → *Jupyter Kernel* → **Python (athena)**.
 
-Everything you may want to change (data folder, initial recording, landmarks and quantity, moving average, plot
-height, export folder) is in the **Parameters** cell. The same functions (`load_trial`, `timeseries_figure`,
+Everything you may want to change (data folder, initial recording, landmarks and quantity, reliability thresholds,
+moving average, plot height, export folder) is in the **Parameters** cell. The same functions (`load_trial`, `timeseries_figure`,
 `compute_series`, `stats_table`, ...) can also be called from code: see the last section of the notebook.
 
 ---

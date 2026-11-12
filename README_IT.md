@@ -11,6 +11,7 @@ scripts/
 ├── athena_calibration.py   # 1. calibrazione multicamera dalla scacchiera -> formato ATHENA
 ├── athena_analysis.py      # 2. pipeline ATHENA headless + grafici di qualità + log dei tempi (singola / batch)
 ├── collect_data3d.py       #    raccoglie tutti i video data3d.mp4 in videos3ddata/
+├── hand_angles.py          #    angoli articolari (MCP, PIP, DIP, TAM, spread, pollice, polso, avambraccio)
 ├── athena_gui.py           #    (opzionale) GUI originale di ATHENA con font ingranditi
 └── requirements.txt
 notebooks/
@@ -91,6 +92,15 @@ data/<registrazione>/athena/
 
 `<trial>` è il nome della registrazione senza data/ora (es. `louis_finertapping_01`), oppure il nome
 delle sottocartelle già presenti in `athena/videos/`.
+
+**Raccomandazioni per le registrazioni** (dalle prime acquisizioni):
+* avviare la registrazione **un paio di secondi prima** che inizi il movimento e fermarla **un paio di secondi
+  dopo** la fine: nei primi e negli ultimi frame le mani sono spesso parzialmente fuori campo o non ancora
+  rilevate, e lo smoothing è meno affidabile ai bordi del trial;
+* evitare per quanto possibile occlusioni complete di una mano (corpo, altra mano, oggetti): una mano occlusa
+  diventa *missing* (i buchi di 6 o più frame non vengono riempiti);
+* le mani dovrebbero essere viste da **almeno 3 camere** per la maggior parte del tempo (controllare
+  `qc_summary.json` o il notebook: con 2 camere una detection sbagliata non si può riconoscere).
 
 ---
 
@@ -271,7 +281,8 @@ scrivono `run_info_<passi>.json` e non cambiano lo stato "completato".
 | `landmarks/<trial>/camN/handedness_score.npy` | confidenza lateralità `(frame, 2)` [sinistra, destra] |
 | `analysis/<trial>/<trial>_3Dlandmarks.csv` | il 3D in CSV: `frame, time_s, <landmark>_x/y/z` (celle vuote = mancante) |
 | `analysis/<trial>/<trial>_hands3d.npy` | solo mani, `(frame, 2 [destra, sinistra], 21, 3)` |
-| `analysis/<trial>/<trial>_3Dquality.npz` | qualità di ogni punto: `status` `(frame, 75)` 0 = mancante, 1 = interpolato, 2 = triangolato; `ncams` camere che lo vedono; `raw3d` triangolazione grezza (prima dello smoothing) |
+| `analysis/<trial>/<trial>_3Dquality.npz` | qualità di ogni punto `(frame, 75)`: `status` 0 = mancante, 1 = interpolato, 2 = triangolato; `ncams` camere che lo vedono; `raw3d` triangolazione grezza (prima dello smoothing); `reproj_max_px` / `reproj_mean_px` errore di riproiezione sulle camere; `dev_mm` \|grezzo − finale\|; `near_gap` entro mezza finestra di smoothing da un buco; `smoothing_window` [frame]. Vedi *Qualità del dato* più sotto |
+| `analysis/<trial>/<trial>_joint_angles.csv` | angoli articolari di entrambe le mani [°] per frame: `frame, time_s, R index MCP flexion, …` (50 angoli, vedi *Angoli articolari*) |
 
 **Indici dei 75 landmark**: 0–32 corpo (MediaPipe Pose), 33–53 mano destra, 54–74 mano sinistra.
 Dentro ogni mano: 0 polso, 1–4 pollice (4 = punta), 5–8 indice (8 = punta), 9–12 medio, 13–16 anulare,
@@ -284,21 +295,100 @@ right, left = d3[:, 33:54], d3[:, 54:75]
 tapping = np.linalg.norm(right[:, 4] - right[:, 8], axis=1)   # distanza pollice-indice [mm]
 ```
 
-**Triangolato o interpolato?** Il 3D finale di ATHENA è filtrato e riempie i buchi più corti di 5 frame,
-quindi da solo non dice quali valori sono misurati. Lo script ripete la triangolazione senza smoothing e
-confronta, punto per punto:
-* **triangolato**: il punto è visto da ≥ 2 camere in quel frame. È un dato misurato, poi filtrato;
-* **interpolato**: il punto è visto da < 2 camere, ma il 3D finale ha un valore riempito dallo smoothing;
-* **mancante**: il 3D finale è vuoto (buco di 5 o più frame).
+### Qualità del dato: cosa fa ATHENA ai dati e quanto è affidabile ogni punto
+
+**Come ATHENA elabora i dati** (`athena.triangulaterefine`, con le opzioni di questa pipeline):
+1. MediaPipe 2D su ogni camera; una detection mancata diventa NaN. Le etichette destra/sinistra vengono rese
+   coerenti tra le camere.
+2. **Triangolazione**: lineare (DLT) con tutte le camere che vedono il punto, se sono almeno 2. **Non c'è
+   esclusione degli outlier**, né soglia sull'errore di riproiezione, né peso per la confidenza: una detection
+   sbagliata in una camera sposta il punto 3D, che conta comunque come "triangolato".
+3. **Smoothing**: filtro Savitzky-Golay (polinomio di grado 3) su ogni coordinata di ogni landmark. La finestra
+   è `int(fps / lfc × 2 + 1)` arrotondata a dispari: **7 frame (175 ms)** a 40 fps con `--lfc 12`.
+   - Prima del filtro **tutti** i buchi vengono riempiti per interpolazione lineare (valore costante all'inizio e
+     alla fine del trial); dopo il filtro il NaN viene rimesso solo per i buchi di **6 o più frame**. I buchi fino
+     a 5 frame (125 ms) restano riempiti.
+   - Un landmark con meno frame validi della finestra non viene filtrato.
+   - Gli altri affinamenti di ATHENA (passa-basso sul centro della mano, vincolo sulla lunghezza delle ossa) in
+     questo passo sono **disattivati**.
+
+Quindi il 3D finale può contenere: valori riempiti per interpolazione lineare (velocità costante e
+accelerazione nulla dentro il buco), valori vicino a un buco distorti dal riempimento, e picchi da detection
+sbagliate attenuati ma non eliminati.
+
+**Affidabilità di ogni punto.** Lo script ripete la triangolazione senza smoothing e salva, per ogni frame e
+landmark, le metriche in `analysis/<trial>/<trial>_3Dquality.npz`. Ogni punto riceve una classe:
+
+| classe | significato |
+|---|---|
+| **reliable** (affidabile) | triangolato (≥ 2 camere) e supera tutti i controlli qui sotto |
+| **suspect** (sospetto) | triangolato, ma non supera almeno un controllo |
+| **interpolated** (interpolato) | visto da < 2 camere, valore riempito dallo smoothing (buco fino a 5 frame) |
+| **missing** (mancante) | nessun valore nel 3D finale (buco di 6 o più frame) |
+
+| controllo | fallisce quando (soglia di default) | cosa rivela |
+|---|---|---|
+| `few_cams` | il punto è visto da meno di **3** camere | nessuna ridondanza: con 2 camere una detection sbagliata non si può riconoscere |
+| `reproj` | errore di riproiezione massimo sulle camere > **20 px** | una camera la cui detection 2D non è coerente con il punto 3D (detection sbagliata / mano sbagliata) |
+| `outlier` | \|grezzo − finale\| > **10 mm** | picco nella triangolazione grezza appiattito dallo smoothing |
+| `near_gap` | entro mezza finestra di smoothing (3 frame) da un buco | valore in parte distorto dal riempimento lineare del buco |
+
+I default (`QUALITY_DEFAULTS` in `athena_analysis.py`) vengono dalle distribuzioni sulle prime registrazioni:
+20 px e 10 mm sono circa il 95°–99° percentile. Il QC li usa per `qc_summary.json` e per il riepilogo stampato
+alla fine di ogni run (`reliable … suspect … (<3 cams …, reproj …, outlier …, near gap …)`); nel notebook si
+possono cambiare in modo interattivo.
 
 ```python
-q = np.load('athena/analysis/<trial>/<trial>_3Dquality.npz')
-status, ncams = q['status'], q['ncams']            # (frame, 75)
-interpolati = status[:, 33 + 8] == 1               # frame in cui la punta dell'indice destro è interpolata
+import numpy as np, sys
+sys.path.insert(0, 'scripts'); import athena_analysis as AA
+q = dict(np.load('data/<registrazione>/athena/analysis/<trial>/<trial>_3Dquality.npz'))
+cls, reasons = AA.quality_classes(q, min_cams=3, max_reproj_px=20, max_dev_mm=10)   # (frame, 75)
+affidabili = cls == 3                     # 0 mancante, 1 interpolato, 2 sospetto, 3 affidabile
+reproj_alta = reasons['reproj']           # anche 'few_cams', 'outlier', 'near_gap'
 ```
 
-Per le registrazioni elaborate prima di questo file: `python scripts/athena_analysis.py data --skip-3d --redo`
-(rifà solo export e QC, pochi secondi). In alternativa lo crea il notebook al primo caricamento.
+Per le registrazioni elaborate prima di queste metriche: `python scripts/athena_analysis.py data --skip-3d --redo`
+(rifà solo export e QC, pochi secondi ciascuna). In alternativa le calcola il notebook al primo caricamento.
+
+### Angoli articolari – `scripts/hand_angles.py`
+
+Calcolati dal 3D finale per entrambe le mani, esportati in `analysis/<trial>/<trial>_joint_angles.csv` e
+disponibili nel notebook (grandezza *joint angles*). In gradi; i nomi iniziano con `R` / `L`.
+
+| angolo | definizione | segno |
+|---|---|---|
+| **MCP flexion** (indice, medio, anulare, mignolo) | metacarpo (polso → MCP) vs falange prossimale (MCP → PIP), attorno all'asse di flessione della mano (MCP indice → MCP mignolo) | 0 = dritto, + flessione, − iperestensione |
+| **PIP flexion** | falange prossimale vs falange media, stesso asse | idem |
+| **DIP flexion** | falange media vs falange distale, stesso asse | idem |
+| **TAM** (total active motion) | MCP + PIP + DIP di un dito | |
+| **spread** indice–medio, medio–anulare, anulare–mignolo | angolo tra le falangi prossimali di dita adiacenti, sul piano del palmo (abduzione MCP) | ≥ 0 |
+| **thumb MCP / IP flexion** | segmenti consecutivi del pollice (CMC → MCP → IP → punta) | 0 = dritto, ≥ 0 |
+| **thumb abduction** | 1° (pollice) vs 2° (indice) metacarpo | ≥ 0 |
+| **wrist flexion/extension** | avambraccio (gomito → polso) vs mano (polso → MCP medio), attorno all'asse di flessione | + flessione palmare, − estensione |
+| **wrist radial/ulnar deviation** | stessi vettori sul piano del palmo | + radiale (lato pollice), − ulnare |
+| **forearm rotation** | normale del palmo vs verticale, attorno all'asse dell'avambraccio (Z mondo verso l'alto) | 0 palmo in giù … 90 verticale … 180 palmo in su |
+
+Perché questi: la flessione MCP e PIP sono le misure principali della funzione delle dita (presa, tapping); la DIP
+completa la catena del dito e il TAM la riassume (misura clinica standard); lo spread descrive l'apertura della
+mano; abduzione e flessioni del pollice descrivono presa e opposizione (le distanze pollice–dita sono nel notebook
+come *distance A–B*); gli angoli di polso e avambraccio descrivono la postura in cui lavora la mano.
+
+Note:
+* il segno della flessione è lo stesso per le due mani (l'asse di flessione è specchiato per la sinistra);
+  verificato sulle registrazioni: PIP e MCP quasi sempre positivi, DIP raramente un po' negativo (iperestensione
+  fisiologica);
+* il landmark 1 del pollice di MediaPipe (CMC) approssima l'articolazione trapezio-metacarpale: la
+  flessione/opposizione della CMC del pollice non viene calcolata come angolo;
+* **gli angoli di polso e avambraccio usano il gomito di MediaPipe Pose**: sulle registrazioni attuali il suo
+  errore di riproiezione è grande (mediana 30–450 px, contro 5–9 px della mano), quindi risultano *suspect* e vanno
+  considerati indicativi;
+* nel notebook la qualità di un angolo in ogni frame è la classe peggiore tra i landmark che usa.
+
+```python
+import sys, numpy as np; sys.path.insert(0, 'scripts')
+from hand_angles import hand_angles
+angles, used = hand_angles(np.load('.../<trial>_3Dlandmarks.npy'), 'R')   # {nome: (frame,) °}, {nome: [landmark]}
+```
 
 ### Grafici di qualità (`analysis/<trial>/`)
 
@@ -311,12 +401,12 @@ Per le registrazioni elaborate prima di questo file: `python scripts/athena_anal
 | `05_timeseries_<mano>.png` | x, y, z di polso / punta pollice / punta indice (linea = finale, punti = triangolazione grezza); velocità con spike (× = oltre mediana + 6·MAD); distanza pollice–indice; camere per punto |
 | `06_reprojection.png` | errore di riproiezione [px] per camera e nel tempo: camere con errore alto = calibrazione o detection sbagliate |
 | `07_bone_lengths.png` | lunghezza delle ossa nel tempo: dovrebbe essere costante; variabilità alta = rumore o scambi di mano |
-| `qc_summary.json` | tutte le metriche numeriche (detection %, buchi, errori, spike, CV ossa) |
+| `qc_summary.json` | tutte le metriche numeriche (detection %, buchi, errori, spike, CV ossa) e, per mano, % affidabili / sospetti / interpolati / mancanti con la quota di ogni controllo fallito (`quality_thresholds` = soglie usate) |
 | `run_options.json`, `run_info.json` | opzioni e info/tempi di questa run |
 
 Note di interpretazione:
 * *raw 3D* = triangolazione diretta delle detection (servono ≥ 2 camere). *final 3D* = output ATHENA dopo
-  lo smoothing, che **interpola i buchi più corti di 5 frame**: un dato "valido" nel finale può essere interpolato.
+  lo smoothing, che **interpola i buchi fino a 5 frame**: un dato "valido" nel finale può essere interpolato.
 * Gli spike di velocità durante il tapping possono essere movimenti reali: valutare insieme alla traccia
   della distanza pollice–indice.
 
@@ -480,27 +570,37 @@ print(ok.groupby(['outputs_profile', 'use_gpu'])[['s_per_camera_frame_2d', 's_pe
 
 ## 5b. Visualizzazione interattiva – `notebooks/landmarks3d_viewer.ipynb`
 
-Notebook Jupyter per esplorare i tracciati 3D. Si sceglie con i controlli:
+Notebook Jupyter per esplorare i tracciati 3D e la loro qualità. Il notebook (testi, controlli, grafici ed
+export) è in inglese; qui sotto tra parentesi i nomi che compaiono nell'interfaccia. Si sceglie con i controlli:
 * **registrazione**;
-* **landmark**, filtrati per gruppo: mano destra, mano sinistra, corpo;
-* **grandezza**:
+* **landmark**, filtrati per gruppo (*Group*: right hand, left hand, body, all);
+* **grandezza** (*Quantity*):
   - posizione x/y/z;
   - velocità (modulo o per componenti) e accelerazione;
   - distanza A–B e angolo A–B–C, per esempio la flessione di un dito;
-  - numero di camere;
-* **intervallo di tempo**.
+  - **angoli articolari** (*joint angles*: flessione MCP, PIP, DIP, TAM, spread, pollice, polso, avambraccio),
+    scelti nella lista *Joint angles* che sostituisce quella dei landmark; la scheda *Statistics* mostra allora, per
+    ogni angolo, qualità e ampiezza di movimento (ROM) su tutti i frame e sui soli frame affidabili;
+  - **lunghezza dell'osso** (*bone length*) che termina in ogni landmark selezionato (es. `R_index_tip` = falange
+    distale): dovrebbe restare costante;
+  - qualità: numero di camere, **errore di riproiezione** (massimo / medio sulle camere), **deviazione grezzo–finale**,
+    con la soglia disegnata come linea tratteggiata;
+* **intervallo di tempo**;
+* **soglie di qualità** (pannello *Quality thresholds*): camere minime, errore di riproiezione massimo, deviazione
+  massima, frame vicino a un buco. Tutti i grafici e le tabelle si aggiornano.
 
 Le quattro schede:
 
 | Scheda | Contenuto |
 |---|---|
-| Serie temporali | grafici zoomabili; bande **arancioni = interpolato**, **rosse = mancante**; opzionale la triangolazione grezza sovrapposta |
-| Traiettoria 3D | percorsi nel tempo + scheletro delle mani a un frame scelto, giunti colorati per stato |
-| Qualità | mappa nel tempo dello stato (o del numero di camere) di ogni landmark |
-| Statistiche | per landmark: % triangolato/interpolato/mancante, camere medie, buchi, ampiezza del movimento, velocità |
+| Time series | grafici zoomabili; bande **viola = sospetto**, **arancioni = interpolato**, **rosse = mancante**; passando col mouse si vedono classe e controlli falliti; opzionale la triangolazione grezza sovrapposta (posizione, lunghezza ossa) |
+| 3D trajectory | percorsi nel tempo + scheletro delle mani a un frame scelto, giunti colorati per classe (col mouse: camere, errore di riproiezione, deviazione) |
+| Quality | mappa nel tempo, per landmark, di classe, numero di camere, errore di riproiezione o deviazione grezzo–finale |
+| Statistics | per landmark: % affidabile/sospetto/interpolato/mancante, % di ogni controllo fallito, camere medie, errore di riproiezione mediano, p99 della deviazione, buchi, ampiezza del movimento, velocità |
 
-*Salva grafico* scrive l'HTML interattivo e *Salva dati* scrive il CSV con lo stato di ogni punto, entrambi in
-`exports/`.
+*Save plot* scrive l'HTML interattivo e *Save data* scrive il CSV con, per ogni landmark, la classe
+(`status_<landmark>`) e i controlli falliti (`flags_<landmark>`, es. `few_cams;reproj`) di ogni punto, entrambi in
+`exports/`. Le ultime celle del notebook mostrano una tabella di affidabilità di tutte le registrazioni.
 
 ```bash
 ~/miniforge3/envs/athena/bin/jupyter lab notebooks/landmarks3d_viewer.ipynb
@@ -508,8 +608,8 @@ Le quattro schede:
 
 In VSCode: aprire il notebook → *Select Kernel* → *Jupyter Kernel* → **Python (athena)**.
 
-Tutto ciò che si può voler cambiare (cartella dati, registrazione, landmark e grandezza iniziali, media mobile,
-altezza grafici, cartella di export) è nella cella **Parametri**. Le stesse funzioni (`load_trial`,
+Tutto ciò che si può voler cambiare (cartella dati, registrazione, landmark e grandezza iniziali, soglie di
+affidabilità, media mobile, altezza grafici, cartella di export) è nella cella **Parameters**. Le stesse funzioni (`load_trial`,
 `timeseries_figure`, `compute_series`, `stats_table`, ...) si possono chiamare anche da codice: vedi l'ultima
 sezione del notebook.
 
